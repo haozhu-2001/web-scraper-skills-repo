@@ -214,7 +214,7 @@ lark-cli base +field-list \
   --as user
 ```
 
-映射字段：URL 列、结果列、备注列、DSL规则列、修改时间列。每次写回前通过 `python references/get_timestamp.py` 获取实时时间填入修改时间列。
+映射字段：URL 列、结果列、备注列、DSL规则列、修改时间列、配置成功列。每次写回前通过 `python references/get_timestamp.py` 获取实时时间填入修改时间列。
 
 #### B2. 逐行读取并处理（处理完一行立即写回一行）
 
@@ -239,10 +239,22 @@ lark-cli base +field-list \
           · 普通抓取：直接提取子 skill 返回的 `rule` 字符串原样填入
           · playwright抓取：子 skill 返回完整 DSL JSON，原样填入不修改
           · 页面异常/检测失败：留空
+        - 配置成功列：按下方"配置成功判定规则"确定值为"是"或"否"
     8. → 🔴 获取当前时间 `NOW=$(python references/get_timestamp.py)`，立即写回当前这条记录（见下方写回命令），写回成功后才能执行步骤 9
     9. → 处理下一条记录
   如果 has_more → 读取下一页
 ```
+
+**配置成功判定规则（步骤 7 中确定）：**
+
+一条记录"配置成功=是"需同时满足以下条件，任一不满足则为"否"：
+
+| 条件 | 要求 |
+|------|------|
+| 结果列已填 | 值必须为以下之一：`普通抓取`、`playwright抓取`、`页面异常`、`检测失败` |
+| DSL规则列正确 | 普通抓取/playwright抓取 → DSL规则列必须非空；页面异常/检测失败 → DSL规则列留空即正确 |
+| 备注列已填 | 非空，且包含子 skill 调用信息（或跳过原因） |
+| 修改时间列已填 | 非空 |
 
 **步骤 8 写回命令（处理完一条记录后立即执行，不得延迟）：**
 
@@ -256,7 +268,7 @@ lark-cli base +record-upsert \
   --base-token <base_token> \
   --table-id <table_id> \
   --record-id <record_id> \
-  --json '{"<结果字段>":"普通抓取","<DSL字段>":"<子skill返回的rule字符串>","<备注字段>":"已调用 static-scraper-config，<结果摘要>","<时间字段>":"'"$NOW"'"}' \
+  --json '{"<结果字段>":"普通抓取","<DSL字段>":"<子skill返回的rule字符串>","<备注字段>":"已调用 static-scraper-config，<结果摘要>","<时间字段>":"'"$NOW"'","<配置成功字段>":"是"}' \
   --as user
 
 # playwright抓取（已调用 dynamic-scraper-config）：
@@ -265,23 +277,25 @@ lark-cli base +record-upsert \
   --base-token <base_token> \
   --table-id <table_id> \
   --record-id <record_id> \
-  --json '{"<结果字段>":"playwright抓取","<DSL字段>":"<子skill返回的完整DSL JSON>","<备注字段>":"已调用 dynamic-scraper-config，<结果摘要>","<时间字段>":"'"$NOW"'"}' \
+  --json '{"<结果字段>":"playwright抓取","<DSL字段>":"<子skill返回的完整DSL JSON>","<备注字段>":"已调用 dynamic-scraper-config，<结果摘要>","<时间字段>":"'"$NOW"'","<配置成功字段>":"是"}' \
   --as user
 
 # 页面异常（HTTP 和浏览器均返回 404/410/50x，不调用子 skill）：
+# 结果列填"页面异常"，备注列填状态码和浏览器情况，DSL规则列留空，配置成功填"是"（因页面本身不可达，规则为空是正确的）
 lark-cli base +record-upsert \
   --base-token <base_token> \
   --table-id <table_id> \
   --record-id <record_id> \
-  --json '{"<结果字段>":"页面异常","<备注字段>":"未调用子skill，<HTTP状态码及浏览器加载情况简述>","<时间字段>":"'"$NOW"'"}' \
+  --json '{"<结果字段>":"页面异常","<备注字段>":"未调用子skill，<HTTP状态码及浏览器加载情况简述>","<时间字段>":"'"$NOW"'","<配置成功字段>":"是"}' \
   --as user
 
 # 检测失败（HTTP 和浏览器均网络层失败，不调用子 skill）：
+# 结果列填"检测失败"，备注列填失败原因，DSL规则列留空，配置成功填"是"（因无法访问，规则为空是正确的）
 lark-cli base +record-upsert \
   --base-token <base_token> \
   --table-id <table_id> \
   --record-id <record_id> \
-  --json '{"<结果字段>":"检测失败","<备注字段>":"未调用子skill，<失败原因>","<时间字段>":"'"$NOW"'"}' \
+  --json '{"<结果字段>":"检测失败","<备注字段>":"未调用子skill，<失败原因>","<时间字段>":"'"$NOW"'","<配置成功字段>":"是"}' \
   --as user
 ```
 
@@ -299,6 +313,13 @@ lark-cli base +record-upsert \
   - 页面异常：备注列必须包含 HTTP 状态码及浏览器加载情况的简要描述（如"HTTP 404，浏览器同样返回 404 页面"）。
   - 检测失败：备注列必须包含失败原因（如"HTTP 连接超时，浏览器也无法打开"）。
 - 页面异常的记录，结果列填 `"页面异常"`；检测失败的记录，结果列填 `"检测失败"`。
+- **配置成功列必填规则：**
+  - 符合以下全部条件时填 `"是"`，任一不满足则填 `"否"`：
+    1. 结果列已填入（`普通抓取` / `playwright抓取` / `页面异常` / `检测失败`）
+    2. DSL规则列状态正确（普通抓取/playwright抓取 → 非空；页面异常/检测失败 → 空是正确的）
+    3. 备注列非空
+    4. 修改时间列非空
+  - 若子 skill 调用异常（如 static-scraper-config / dynamic-scraper-config 返回错误、超时），导致 DSL规则列为空或备注不完整，则填 `"否"`。
 
 #### B3. 输出最终汇总
 
@@ -317,6 +338,11 @@ lark-cli base +record-upsert \
 | playwright抓取 | M |
 | 页面异常 | P |
 | 检测失败 | K |
+
+| 配置成功 | 数量 |
+|----------|------|
+| 是 | Y |
+| 否 | Z |
 
 Base: <base_url>
 共更新 X 条记录。
@@ -363,6 +389,7 @@ Base: <base_url>
 14. 🔴 **逐条处理，逐条写回**：读取 → 检测 → 子 skill → 整合 → **立即写回当前这条** → 下一条。**严禁将所有结果攒到最后批量写回。** 写回必须在处理下一条之前完成。
 15. **最多 200 条每页**，`has_more` 时串行翻页。
 16. **批量模式下，B4 汇总报告仅在所有记录处理并写回完成后输出**，汇总阶段不再写回。
+17. **配置成功列判定规则**：一条记录的结果列、DSL规则列（按场景）、备注列、修改时间列全部正确填充时填 `"是"`，否则填 `"否"`。子 skill 调用失败导致规则或备注缺失也填 `"否"`。具体见 Part B 配置成功判定规则。
 
 ## 清理
 
