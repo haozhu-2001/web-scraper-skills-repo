@@ -131,7 +131,9 @@ description: 配置动态抓取规则，定义目标网站的抓取字段、URL 
 
 ---
 
-## 第五步：输出
+## 第五步：XPath 提取结果
+
+完成前四步后，得到以下中间结果（供后续步骤使用，非最终输出）：
 
 ```json
 {
@@ -141,8 +143,6 @@ description: 配置动态抓取规则，定义目标网站的抓取字段、URL 
   "next_page": "XPath|scroll|null"
 }
 ```
-
-输出 JSON 后任务完成。
 
 ---
 
@@ -576,17 +576,55 @@ browser.open                   → 打开列表页
 { "op_type": "element.click", "params": { "selector": "xpath=//button[@class='load-more']" } }
 ```
 
-## 7.5 输出
+## 7.5 最终输出
 
-生成完整的 DSL JSON。注意以下规则：
+将生成的 DSL JSON 填入 `config` 字段，按以下统一格式输出：
+
+```json
+{
+  "scrapable": true,
+  "method": "playwright抓取",
+  "rule": "xpath规则",
+  "config": {
+    "spider_source_id": null,
+    "entry": [
+      { "op_sequence": 1, "op_name": "browser.open", "op_type": "browser.open", "params": { "url": "<列表页URL>" } },
+      { "op_sequence": 2, "op_name": "data.select", "op_type": "data.select", "params": { "save_as": "list_rows", "selector": "xpath=<list_item>", "mode": "cover" } },
+      ...
+    ]
+  }
+}
+```
+
+**`config` 内即为 7.3/7.4 节生成的完整 DSL JSON。**
+
+输出规则：
 
 1. 每个 `children` 内的组件 `op_sequence` 从 1 重新编号
-2. `spider_source_id` 使用用户提供的值，无则留占位符
+2. `spider_source_id` 使用用户提供的值，无则留 `null`
 3. `browser.open` 的 `url` 使用用户提供的列表页 URL
 4. `control.loop` 的 `step=1`，`start=0`，`stop` 为第六步判定的分页数
 5. 所有 selector 必须以 `xpath=` 开头
+6. `method` 固定为 `"playwright抓取"`，`rule` 固定为 `"xpath规则"`
 
 输出 JSON 后任务完成。
+
+---
+
+# 第八步：XPath 不可提取时的兜底
+
+如果经过第二步（源码分析）和第三步（DOM 验证）的完整流程，仍然无法确定可靠的 `list_item`、`url`、`title` 三个 XPath（容器无法定位、DOM 验证命中数不一致、链接/标题提取为空等），则此 URL 不可通过 playwright 配置抓取规则：
+
+```json
+{
+  "scrapable": false,
+  "method": null,
+  "rule": null,
+  "reason": "XPath不可提取：<具体原因>"
+}
+```
+
+**输出此 JSON 后任务结束**，不再执行后续的分页判定和 DSL 生成步骤。
 
 ---
 
