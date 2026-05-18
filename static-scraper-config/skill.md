@@ -1,6 +1,6 @@
 ---
 name: static-scraper-config
-description: 配置普通抓取规则，定义目标网站的抓取字段、URL 模式和输出格式。
+description: 配置普通抓取（HTTP 直接请求）规则。自动检测页面源码中的 PR Newswire Widget 脚本并生成 Widget 抓取规则，或通过默认列表容器验证 / XPath 规则配置普通列表页抓取。
 ---
 
 # Static Scraper Config
@@ -15,6 +15,16 @@ description: 配置普通抓取规则，定义目标网站的抓取字段、URL 
 
 ---
 
+## Input
+
+调用方（`web-scraper-detector` 第五步）通过 Skill 工具的 `args` 参数传入：目标 URL 和检测结论摘要。
+
+本 skill 的职责：独立完成 HTTP 请求 → Widget 检测 → 默认规则验证 / XPath 规则配置 → 输出统一 JSON。
+
+> 如果调用方已通过 HTTP 获取页面源码，可将源码文件路径传入以避免重复请求。若未传入源码路径，本 skill 第一步自行下载。
+
+---
+
 # 默认规则：源码验证列表项
 
 **核心原则：纯 HTTP 请求获取源码，在源码中验证列表项 `<a>` 标签的 `@href` 和 `text()` 是否构成合法条目。不依赖浏览器。**
@@ -26,6 +36,7 @@ description: 配置普通抓取规则，定义目标网站的抓取字段、URL 
 用 curl 发起 GET 请求，携带真实浏览器 User-Agent：
 
 ```bash
+TEMP=$(mktemp -d)
 HTTP_CODE=$(curl -s -o "$TEMP/source.html" -w "%{http_code}" \
   --max-time 15 \
   --max-redirs 5 \
@@ -40,14 +51,77 @@ wc -c < "$TEMP/source.html"
 - HTTP 返回 200 + 有意义的 HTML 内容 → 继续
 - HTTP 超时 / 空响应 / 403 / 503 → **不可普通抓取**，改为 `dynamic-scraper-config` 流程
 
+完成后需清理临时文件：
+```bash
+rm -rf "$TEMP"
+```
+
 ---
 
-## 第二步：URL 类型预判（强制，不可跳过）
+## 第二步：Widget 检测（强制，不可跳过）
 
-检查目标 URL 是否包含 `tools.prnewswire.com`：
+**在第一步下载的源码文件（`$TEMP/source.html`）中检测 PR Newswire Widget 脚本。不依赖浏览器，不检查目标 URL 本身。**
 
-- **是** → 跳过第三步（默认规则验证），直接进入第五步 XPath 规则配置，使用 **Widget 类型配置**（5.3.2）
-- **否** → 继续第三步，验证默认规则
+### 2.1 搜索 Widget 特征
+
+在源码中搜索以下两种 Widget 特征：
+
+**特征 A — Widget 脚本标签**：搜索包含 `_wsc` 和 `tools.prnewswire.com` 的 `<script>` 标签：
+
+```bash
+LC_ALL=C grep -nE '_wsc.*tools\.prnewswire\.com' "$TEMP/source.html"
+```
+
+**特征 B — Widget 注释标记**：搜索 `PR Newswire Widget` 注释：
+
+```bash
+LC_ALL=C grep -n 'PR Newswire Widget' "$TEMP/source.html"
+```
+
+### 2.2 提取 Widget URL
+
+若 2.1 中任一特征命中，从源码中提取 Widget 脚本的 `src` 值。Widget 脚本格式如下：
+
+```html
+<script>
+var _wsc = document.createElement('script');
+_wsc.src = "//tools.prnewswire.com/id/live/28417/landing.js";
+document.getElementsByTagName('Head')[0].appendChild(_wsc);
+</script>
+```
+
+提取 `_wsc.src` 的 URL 值：
+
+```bash
+# 提取 _wsc.src 中的 URL（双引号或单引号包裹的值）—— 用 sed 替代 grep -P 避免 Perl 兼容性问题
+WIDGET_URL=$(LC_ALL=C sed -nE 's/.*_wsc\.src[[:space:]]*=[[:space:]]*["'\''']([^"'\''']*)["'\'''].*/\1/p' "$TEMP/source.html" | head -1)
+echo "WIDGET_URL=$WIDGET_URL"
+```
+
+### 2.3 URL 标准化
+
+将提取到的 Widget URL 转换为合法的列表页 URL。转换规则：
+
+1. **补全协议**：若 URL 以 `//` 开头，前面拼接 `http:`
+2. **插入 `/list/` 并去除 `.js`**：将 URL 末尾的 `/<文件名>.js` 替换为 `/list/<文件名>`（即去除 `.js` 后缀，并在最后一段路径前插入 `/list/`）
+
+```bash
+# 标准化：补全协议 + 将 /xxx.js 替换为 /list/xxx
+WIDGET_NORMALIZED_URL=$(echo "$WIDGET_URL" | sed 's|^//|http://|' | sed 's|/\([^/]\+\)\.js$|/list/\1|')
+echo "WIDGET_NORMALIZED_URL=$WIDGET_NORMALIZED_URL"
+```
+
+**转换示例**：
+
+| 原始 Widget URL | 标准化后 |
+|---|---|
+| `//tools.prnewswire.com/id/live/28417/landing.js` | `http://tools.prnewswire.com/id/live/28417/list/landing` |
+| `//tools.prnewswire.com/id/live/99999/widget.js` | `http://tools.prnewswire.com/id/live/99999/list/widget` |
+
+### 2.4 分支判断
+
+- **Widget 特征命中（特征 A 或 特征 B）且成功提取到 URL** → **Widget 类型**，跳过第三步（默认规则验证），直接进入第五步 XPath 规则配置，使用 **Widget 类型配置**（5.3.2）。同时记录标准化后的 Widget URL 用于输出。
+- **Widget 特征未命中** → 继续第三步，验证默认规则。
 
 ---
 
@@ -79,16 +153,16 @@ wc -c < "$TEMP/source.html"
 ```bash
 # 常见列表容器模式（按优先级排列）：
 # 1. <li> 列表项（最可靠）
-grep -oP '<li[^>]*class="([^"]*)"[^>]*>' "$TEMP/source.html" | sort | uniq -c | sort -rn | head -10
+LC_ALL=C grep -oE '<li[^>]*class="[^"]*"[^>]*>' "$TEMP/source.html" | sort | uniq -c | sort -rn | head -10
 
 # 2. <article> 或 <section> 容器
-grep -oP '<(article|section)[^>]*class="([^"]*)"[^>]*>' "$TEMP/source.html" | sort | uniq -c | sort -rn | head -10
+LC_ALL=C grep -oE '<(article|section)[^>]*class="[^"]*"[^>]*>' "$TEMP/source.html" | sort | uniq -c | sort -rn | head -10
 
 # 3. <div> 带 class 的容器（最常见但需排除非列表用途）
-grep -oP '<div[^>]*class="([^"]*)"[^>]*>' "$TEMP/source.html" | sort | uniq -c | sort -rn | head -20
+LC_ALL=C grep -oE '<div[^>]*class="[^"]*"[^>]*>' "$TEMP/source.html" | sort | uniq -c | sort -rn | head -20
 
 # 4. <tr> 表格行
-grep -oP '<tr[^>]*class="([^"]*)"[^>]*>' "$TEMP/source.html" | sort | uniq -c | sort -rn | head -10
+LC_ALL=C grep -oE '<tr[^>]*class="[^"]*"[^>]*>' "$TEMP/source.html" | sort | uniq -c | sort -rn | head -10
 ```
 
 筛选出出现次数 ≥ 3 的容器标签/class 组合。对于每种候选容器，在源码中确认：
@@ -101,14 +175,14 @@ grep -oP '<tr[^>]*class="([^"]*)"[^>]*>' "$TEMP/source.html" | sort | uniq -c | 
 
 #### 3.2.2 在容器内提取并验证 `<a>` 标签
 
-对 2.2.1 中找到的每种候选容器，取其中一个容器作为样本，展开其完整 HTML 内容。在**容器内部**提取所有 `<a>` 标签并验证：
+对 3.2.1 中找到的每种候选容器，取其中一个容器作为样本，展开其完整 HTML 内容。在**容器内部**提取所有 `<a>` 标签并验证：
 
 ```bash
 # 假设已定位到容器，提取容器内满足条件的 <a> 标签：
 # 1. href 指向 http/https 的合法 URL
 # 2. 链接文本长度 ≥ 5
 # 3. href 不是 #、javascript:、mailto:、tel:
-grep -oiE '<a [^>]*href="https?://[^"]*"[^>]*>[^<]{5,}</a>'
+LC_ALL=C grep -oiE '<a [^>]*href="https?://[^"]*"[^>]*>[^<]{5,}</a>'
 ```
 
 对容器内的 `<a>` 标签进行评分：
@@ -140,22 +214,24 @@ grep -oiE '<a [^>]*href="https?://[^"]*"[^>]*>[^<]{5,}</a>'
 {
   "scrapable": true,
   "method": "普通抓取",
-  "rule": "默认规则"
+  "rule": "默认规则",
+  "config": null,
+  "reason": null
 }
 ```
 
-- 满足默认规则 → `scrapable: true`，`method: "普通抓取"`，`rule: "默认规则"`，流程结束
+- 满足默认规则 → `scrapable: true`，`method: "普通抓取"`，`rule: "默认规则"`，`config: null`（无 DSL config），`reason: null`，流程结束
 - 不满足 → 进入第五步，尝试 XPath 规则配置
 
 ---
 
-# 第五步：XPath 规则配置（默认规则不满足时，或 URL 含 `tools.prnewswire.com` 时）
+# 第五步：XPath 规则配置（默认规则不满足时，或第二步检测到 Widget 时）
 
 **适用场景**：
-- URL 含 `tools.prnewswire.com`（第二步直接跳入，无需经过默认规则验证）
+- 第二步在源码中检测到 PR Newswire Widget 脚本（直接跳入，无需经过默认规则验证）
 - 第三步未能定位到 ≥ 3 次重复的列表容器，但页面源码中确实存在可抓取的列表项（如容器 class 不统一、列表项散布在不同父级下、或使用非标准结构）
 
-**核心原则：在源码中逐个定位列表项，提取 XPath，验证后根据 URL 类型选择对应的操作组件规则。**
+**核心原则：在源码中逐个定位列表项，提取 XPath，验证后根据第二步的判断结果选择对应的操作组件规则。**
 
 ## 5.1 读取参考文档（强制）
 
@@ -241,33 +317,35 @@ grep -n "条目标题关键字" "$TEMP/source.html"
 - **title_xpath_exp**：每个容器内，按 title_xpath_exp 的路径能找到可读的标题文字吗？文字内容和页面上显示的一致吗？
 - **误命中检查**：源码中其他区域有没有同标签名但结构不同的元素会被这些 XPath 误命中？
 
-不通过 → 回到 4.2.2，调整容器锚点。
+不通过 → 回到 5.2.2，调整容器锚点。
 
 ### 5.2.5 XPath 验证命令
 
 ```bash
 # 验证 list_xpath_exp：统计命中数
-grep -oP '<容器标签[^>]*class="容器class"[^>]*>' "$TEMP/source.html" | wc -l
+LC_ALL=C grep -oE '<容器标签[^>]*class="容器class"[^>]*>' "$TEMP/source.html" | wc -l
 
 # 验证每个容器内都有链接
-grep -oP '<a [^>]*href="https?://[^"]*"[^>]*>[^<]{5,}</a>' "$TEMP/source.html" | wc -l
+LC_ALL=C grep -oE '<a [^>]*href="https?://[^"]*"[^>]*>[^<]{5,}</a>' "$TEMP/source.html" | wc -l
 
 # 验证标题文本存在
-grep -oP '<h[23][^>]*class="[^"]*title[^"]*"[^>]*>[^<]+</h[23]>' "$TEMP/source.html" | head -10
+LC_ALL=C grep -oE '<h[23][^>]*class="[^"]*title[^"]*"[^>]*>[^<]+</h[23]>' "$TEMP/source.html" | head -10
 ```
 
 ## 5.3 确定 URL 类型并生成配置
 
-### 5.3.1 URL 类型判断
+### 5.3.1 类型判断
 
-URL 类型已在第二步确定，此处按以下路径处理：
+根据第二步的 Widget 检测结果决定配置路径：
 
-- **第二步已判为 Widget 类型**（URL 含 `tools.prnewswire.com`）→ 使用 `normal_list_page_parser_with_content_widget` 组件，跳至 5.3.2
+- **第二步检测到 Widget**（源码中含 `_wsc.src = "//tools.prnewswire.com/..."` 或 `<!-- PR Newswire Widget Code Starts Here -->`）→ 使用 `normal_list_page_parser_with_content_widget` 组件，跳至 5.3.2
 - **其他**（第三步默认规则不满足，流入此处的非 Widget URL）→ 普通 XPath 类型，使用 `normal_list_page_parser_list_page_parser_use_xpath` + `normal_list_page_push_detail_page_parser_use_xpath` 组件，跳至 5.3.3
 
-### 5.3.2 Widget 类型配置（URL 含 `tools.prnewswire.com`）
+### 5.3.2 Widget 类型配置（第二步检测到 Widget 时）
 
-使用 `normal_list_page_parser_with_content_widget` 组件。`lable_xpath` 参数值为 `list_xpath_exp`（列表项容器的绝对 XPath）。
+**使用 `normal_list_page_parser_with_content_widget` 组件。`lable_xpath` 参数值为 5.2.3 中的 `list_xpath_exp`（列表项容器的绝对 XPath）。**
+
+**Widget URL**：使用第二步 2.3 中标准化后的 `WIDGET_NORMALIZED_URL`（已补全 `http:` 协议并去除 `.js` 后缀）。
 
 **参数映射**：
 
@@ -285,16 +363,14 @@ URL 类型已在第二步确定，此处按以下路径处理：
   "rule": "widget规则",
   "config": {
     "spider_source_id": null,
+    "widget_url": "<WIDGET_NORMALIZED_URL>",
     "op_list": [
       {
-        "operate_id": null,
-        "parent_id": null,
         "op_name": "普通列表解析含正文widget",
         "op_type": "normal_list_page_parser_with_content_widget",
         "op_sequence": 1,
         "op_param": [
           {
-            "operate_id": null,
             "op_type": "normal_list_page_parser_with_content_widget",
             "param_define_id": 48,
             "param_code": "lable_xpath",
@@ -302,7 +378,6 @@ URL 类型已在第二步确定，此处按以下路径处理：
             "param_value": "<list_xpath_exp>"
           },
           {
-            "operate_id": null,
             "op_type": "normal_list_page_parser_with_content_widget",
             "param_define_id": 49,
             "param_code": "wait_time",
@@ -310,16 +385,16 @@ URL 类型已在第二步确定，此处按以下路径处理：
             "param_value": "1"
           }
         ],
-        "sub_op_list": null,
         "spider_type": 7,
         "list_page_type": 1
       }
     ]
-  }
+  },
+  "reason": null
 }
 ```
 
-### 5.3.3 普通 XPath 类型配置（URL 不含 `tools.prnewswire.com`）
+### 5.3.3 普通 XPath 类型配置（第二步未检测到 Widget，默认规则不满足时）
 
 使用两个组件：列表解析 + 推送正文。
 
@@ -342,14 +417,11 @@ URL 类型已在第二步确定，此处按以下路径处理：
     "spider_source_id": null,
     "op_list": [
       {
-        "operate_id": null,
-        "parent_id": null,
         "op_name": "普通列表解析列表列表xpath解析",
         "op_type": "normal_list_page_parser_list_page_parser_use_xpath",
         "op_sequence": 1,
         "op_param": [
           {
-            "operate_id": null,
             "op_type": "normal_list_page_parser_list_page_parser_use_xpath",
             "param_define_id": 51,
             "param_code": "list_xpath_exp",
@@ -357,7 +429,6 @@ URL 类型已在第二步确定，此处按以下路径处理：
             "param_value": "<list_xpath_exp>"
           },
           {
-            "operate_id": null,
             "op_type": "normal_list_page_parser_list_page_parser_use_xpath",
             "param_define_id": 52,
             "param_code": "link_xpath_exp",
@@ -365,7 +436,6 @@ URL 类型已在第二步确定，此处按以下路径处理：
             "param_value": "<link_xpath_exp>"
           },
           {
-            "operate_id": null,
             "op_type": "normal_list_page_parser_list_page_parser_use_xpath",
             "param_define_id": 53,
             "param_code": "title_xpath_exp",
@@ -373,23 +443,20 @@ URL 类型已在第二步确定，此处按以下路径处理：
             "param_value": "<title_xpath_exp>"
           }
         ],
-        "sub_op_list": null,
         "spider_type": 9,
         "list_page_type": 1
       },
       {
-        "operate_id": null,
-        "parent_id": null,
         "op_name": "普通列表推送正文列表xpath解析",
         "op_type": "normal_list_page_push_detail_page_parser_use_xpath",
         "op_sequence": 1,
         "op_param": [],
-        "sub_op_list": null,
         "spider_type": 9,
         "list_page_type": 2
       }
     ]
-  }
+  },
+  "reason": null
 }
 ```
 
@@ -406,4 +473,4 @@ URL 类型已在第二步确定，此处按以下路径处理：
 }
 ```
 
-**输出此 JSON 后任务结束**，改为 `dynamic-scraper-config` 流程继续尝试。
+**输出此 JSON 后任务结束**。调用方（`web-scraper-detector`）收到 `scrapable=false` 后将结果列填为"配置失败"。

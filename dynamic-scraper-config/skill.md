@@ -15,6 +15,16 @@ description: 配置动态抓取规则，定义目标网站的抓取字段、URL 
 
 ---
 
+## Input
+
+调用方（`web-scraper-detector` 第五步）通过 Skill 工具的 `args` 参数传入：目标 URL 和检测结论摘要（含 HTTP 状态码、标题、内容长度等关键指标）。
+
+本 skill 的职责：独立完成页面源码获取 → XPath 结构分析 → DOM 验证 → 分页判定 → DSL 生成 → 输出统一 JSON。
+
+> 本 skill 需要自行打开浏览器获取源码并验证 XPath。调用方的浏览器会话在检测完成后已关闭，不可复用。
+
+---
+
 # 浏览器任务指令：列表页 XPath 解析
 
 **核心原则：先源码，后验证。源码分析完成之前，不允许在真实页面上执行任何 XPath。**
@@ -110,7 +120,14 @@ description: 配置动态抓取规则，定义目标网站的抓取字段、URL 
 
 **到了这一步，才第一次在真实页面上执行 XPath。** 目的是确认源码分析的结果在动态渲染后仍然正确。
 
-执行三个 XPath，检查：
+首先打开浏览器并加载页面：
+
+```bash
+browser-use open "$URL"
+sleep 2
+```
+
+然后逐条 eval 执行三个 XPath（禁止 `browser-use get html` / `browser-use state`），检查：
 
 1. **命中数**：三个 XPath 命中数应一致，且与页面上主列表可见条目数大致匹配。
 2. **归属正确**：抽查 2~3 组，每个 `url` 和 `title` 确实归属于对应的 `list_item` 容器。
@@ -535,17 +552,6 @@ browser.open                   → 打开列表页
 | `html_content` | `"xpath=//html"` | 全页 HTML，必填 |
 | `content` | 视页面结构而定 | 正文区域文本，按需选填 |
 
-如果详情页需要清理 DOM（去广告、去导航等），在 `html_content` 字段上加 processor：
-
-```json
-"html_content": {
-  "selector": "xpath=//html",
-  "processors": [
-    { "type": "dom_clean" }
-  ]
-}
-```
-
 ### 7.4.4 element.click（打开详情页，在 foreach 内）
 
 | 参数 | 值 | 说明 |
@@ -592,7 +598,8 @@ browser.open                   → 打开列表页
       { "op_sequence": 2, "op_name": "data.select", "op_type": "data.select", "params": { "save_as": "list_rows", "selector": "xpath=<list_item>", "mode": "cover" } },
       ...
     ]
-  }
+  },
+  "reason": null
 }
 ```
 
