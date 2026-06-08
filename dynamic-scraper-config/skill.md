@@ -77,17 +77,33 @@ description: 配置动态抓取规则，定义目标网站的抓取字段、URL 
 
 #### url —— 条目详情页链接，末尾带 `/@href`
 
-从容器锚点出发，用 `//` 找到内部的 `<a>` 标签，取 `href` 属性：
+> **核心铁律：url 必须取标题所在的 `<a>` 标签，严禁取图片、视频、图标等可选元素的 `<a>`。**
+>
+> 原因：图片可能被懒加载、缺省图、或部分条目无图，导致 XPath 命中数不一致或取到错误链接。标题是每个条目必备的，标题 `<a>` 最稳定。
+
+从容器锚点出发，找到包裹标题文字的 `<a>` 标签，取 `href` 属性。
+
+**优先写法**（标题在 `<a>` 内，用标题标签做锚点定位该 `<a>`）：
 
 ```
-//容器标签[@属性='值']//a[@class='链接class']/@href
+.//a[.//h3[@class='标题class']]/@href
+.//a[./h2]/@href
 ```
 
-如果 `<a>` 没有稳定 class，而包裹它的某个标签（如 `<h2>`）有稳定特征，则经过该标签：
+**备选写法**（标题标签包裹 `<a>`，最外层是 `<h2>`/`<h3>` 等）：
 
 ```
 //容器标签[@属性='值']//标题标签/a/@href
 ```
+
+**禁用写法**（取容器内第一个 `<a>`，可能命中图片链接）：
+
+```
+❌ .//a[1]/@href          ← 容器内第一个 <a> 往往是图片，不可靠
+❌ .//div[@class='thumb']/a/@href   ← 图片容器，部分条目无图片
+```
+
+**判断方法**：定位到标题文字所在行，看它是 `<a>标题</a>` 还是 `<h2><a>标题</a></h2>`，然后选择"用标题标签定位 `<a>`"或"用标题标签的父级 `<a>`"。
 
 #### title —— 条目标题文本
 
@@ -108,7 +124,7 @@ description: 配置动态抓取规则，定义目标网站的抓取字段、URL 
 用三个 XPath 的思路，在源码文本中手动验证：
 
 - **list_item**：源码中这组容器重复的次数，和页面上肉眼看到的条目数大致一致吗？
-- **url**：每个容器内，按 url 的路径能找到 `<a href="...">` 且指向详情页（不是 `#`、不是 `javascript:`）吗？
+- **url**：每个容器内，按 url 的路径能找到 `<a href="...">` 且指向详情页（不是 `#`、不是 `javascript:`）吗？**url XPath 定位的 `<a>` 是否就是包裹标题文字的那个 `<a>`？** 检查方法：将 url XPath 去掉末尾 `/@href`，和 title XPath 去掉末尾 `/text()`，看它们是否定位到同一个 `<a>` 标签。不是同一个 → 说明 url 取到了图片 `<a>` 或其他元素，需要修正。
 - **title**：每个容器内，按 title 的路径能找到可读的标题文字吗？文字内容和页面上显示的一致吗？
 - **误命中检查**：源码中其他区域有没有同标签名但结构不同的元素会被这三个 XPath 误命中？
 
@@ -456,7 +472,8 @@ regex: /(\d{4})(\d{2})(\d{2})/
 
 ```
 browser.open                   → 打开列表页
-  data.select                  → 选中所有列表项容器
+  control.loop                 → 单次循环（start=0, stop=1, step=1）
+    data.select                → 选中所有列表项容器
     control.foreach            → 遍历每个容器
       data.enrich              → 注入 meta 字段（lang, spider_source_id）
       data.extract (source=row) → 从容器提取 url / title 等列表字段
@@ -467,6 +484,7 @@ browser.open                   → 打开列表页
         data.push              → 推送 kafka
         browser.close_tab      → 关闭详情页标签
         browser.switch_tab     → 切回列表页主标签，继续遍历
+    element.click              → 点击"下一页"按钮（stop=1 时不会执行，结构保留）
 ```
 
 ### 7.3.2 模板 3.4：分页列表详情抓取
@@ -561,6 +579,7 @@ browser.open                   → 打开列表页
 
 > 如果 list_item 选中的就是 `<a>` 标签，则 `element.click` 直接点 source 即可，无需额外 `selector`。
 > 如果 list_item 选中的是容器，且容器内 `<a>` 标签有明确的 XPath，则加 `selector` 参数指向该 `<a>`。
+> **`selector` 必须和 url XPath 定位同一个 `<a>`（即标题所在的 `<a>`），去掉 url XPath 末尾的 `/@href` 即得到 selector。** 例如 url 为 `.//a[.//h3[@class='title']]/@href`，则 selector 为 `.//a[.//h3[@class='title']]`。
 
 ### 7.4.5 element.click（翻页按钮，在 loop 内、foreach 外）
 
